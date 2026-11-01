@@ -52,7 +52,7 @@ app:
   workshop:
     # wide = весь сценарий заказа выполняется в одной транзакции.
     # narrow = транзакция охватывает только операции с БД (ветка solution).
-    transaction-scope: ${WORKSHOP_TRANSACTION_SCOPE:wide}
+    transaction-scope: ${WORKSHOP_TRANSACTION_SCOPE:narrow}
     watchdog-interval-ms: ${WORKSHOP_WATCHDOG_INTERVAL_MS:2000}
 
 management:

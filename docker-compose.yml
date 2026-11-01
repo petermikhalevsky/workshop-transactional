@@ -51,7 +51,7 @@ services:
       PAYMENT_READ_TIMEOUT_MS: ${PAYMENT_READ_TIMEOUT_MS:-5000}
       # wide = весь checkout в одной транзакции (сломанный master).
       # narrow = транзакция только вокруг операций с БД (ветка solution).
-      WORKSHOP_TRANSACTION_SCOPE: ${WORKSHOP_TRANSACTION_SCOPE:-wide}
+      WORKSHOP_TRANSACTION_SCOPE: ${WORKSHOP_TRANSACTION_SCOPE:-narrow}
       WORKSHOP_WATCHDOG_INTERVAL_MS: ${WORKSHOP_WATCHDOG_INTERVAL_MS:-2000}
       MANAGEMENT_PORT: ${MANAGEMENT_PORT:-8081}
     ports:
