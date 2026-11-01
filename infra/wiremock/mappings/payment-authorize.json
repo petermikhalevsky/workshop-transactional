@@ -1,0 +1,18 @@
+{
+  "request": {
+    "method": "POST",
+    "url": "/v1/payments/authorize"
+  },
+  "response": {
+    "status": 200,
+    "fixedDelayMilliseconds": 800,
+    "headers": {
+      "Content-Type": "application/json"
+    },
+    "jsonBody": {
+      "providerReference": "pay_{{randomValue type='ALPHANUMERIC' length=10}}",
+      "status": "APPROVED"
+    },
+    "transformers": ["response-template"]
+  }
+}

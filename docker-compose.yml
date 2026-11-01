@@ -1,0 +1,184 @@
+name: transactional-workshop
+
+# =============================================================================
+# Transactional War Room — стенд для поиска проблемы в проде.
+# Запуск:  docker compose up -d --build
+# =============================================================================
+
+services:
+
+  # ---------------------------------------------------------------------------
+  # 1. PostgreSQL. Хранит заказы, попытки оплаты и аудит.
+  # ---------------------------------------------------------------------------
+  postgres:
+    image: postgres:16-alpine
+    container_name: transactional-postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-workshop}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-workshop}
+      POSTGRES_DB: ${POSTGRES_DB:-workshop}
+    volumes:
+      - ./db/init:/docker-entrypoint-initdb.d:ro
+      - postgres-data:/var/lib/postgresql/data
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-workshop} -d ${POSTGRES_DB:-workshop}"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
+    networks: [workshop-net]
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # 2. order-service. JRE-only: jstack/jcmd внутри нет.
+  # ---------------------------------------------------------------------------
+  order-service:
+    build:
+      context: ./app
+    image: order-service:workshop
+    container_name: transactional-order-service
+    environment:
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: ${POSTGRES_DB:-workshop}
+      DB_USER: ${POSTGRES_USER:-workshop}
+      DB_PASSWORD: ${POSTGRES_PASSWORD:-workshop}
+      DB_POOL_MAX: ${DB_POOL_MAX:-10}
+      PAYMENT_URL: http://wiremock:8080
+      PAYMENT_CONNECT_TIMEOUT_MS: ${PAYMENT_CONNECT_TIMEOUT_MS:-2000}
+      PAYMENT_READ_TIMEOUT_MS: ${PAYMENT_READ_TIMEOUT_MS:-5000}
+      # wide = весь checkout в одной транзакции (сломанный master).
+      # narrow = транзакция только вокруг операций с БД (ветка solution).
+      WORKSHOP_TRANSACTION_SCOPE: ${WORKSHOP_TRANSACTION_SCOPE:-wide}
+      WORKSHOP_WATCHDOG_INTERVAL_MS: ${WORKSHOP_WATCHDOG_INTERVAL_MS:-2000}
+      MANAGEMENT_PORT: ${MANAGEMENT_PORT:-8081}
+    ports:
+      - "${APP_PORT:-8080}:8080"
+      - "${MANAGEMENT_PORT:-8081}:8081"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      wiremock:
+        condition: service_started
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8081/actuator/health/liveness >/dev/null 2>&1 || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 6
+      start_period: 45s
+    stop_grace_period: 15s
+    networks: [workshop-net]
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # 3. WireMock — внешний платёжный шлюз. Отвечает через 800 мс.
+  # ---------------------------------------------------------------------------
+  wiremock:
+    image: wiremock/wiremock:3.9.1
+    container_name: transactional-wiremock
+    command: ["--global-response-templating", "--disable-banner"]
+    volumes:
+      - ./infra/wiremock/mappings:/home/wiremock/mappings:ro
+    ports:
+      - "${WIREMOCK_PORT:-8089}:8080"
+    networks: [workshop-net]
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # 4. Prometheus. Скрейпит management-порт 8081 каждые 2 секунды.
+  # ---------------------------------------------------------------------------
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    container_name: transactional-prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--storage.tsdb.retention.time=2h'
+      - '--web.enable-lifecycle'
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    ports:
+      - "${PROMETHEUS_PORT:-9090}:9090"
+    depends_on:
+      order-service:
+        condition: service_started
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:9090/-/healthy >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 30s
+    networks: [workshop-net]
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # 5. Grafana — дашборд «Transactional Pool War Room».
+  # ---------------------------------------------------------------------------
+  grafana:
+    image: grafana/grafana:11.3.0
+    container_name: transactional-grafana
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-admin}
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_USERS_DEFAULT_THEME: dark
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/transaction-dashboard.json
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    ports:
+      - "${GRAFANA_PORT:-3000}:3000"
+    depends_on:
+      prometheus:
+        condition: service_started
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3000/api/health >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 60s
+    networks: [workshop-net]
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # 6. Генератор нагрузки. Не стартует вместе со стендом: профиль load.
+  #    ./scripts/start-load.sh 600 20
+  # ---------------------------------------------------------------------------
+  load-generator:
+    profiles: ["load"]
+    build:
+      context: ./load-test
+    image: transactional-workshop-loadtest:latest
+    container_name: transactional-load-generator
+    volumes:
+      - ./artifacts:/artifacts
+    environment:
+      TARGET_URL: http://order-service:8080
+      REQ_TIMEOUT: ${LOAD_REQ_TIMEOUT:-15}
+    command:
+      - sh
+      - -c
+      - |
+        echo "[load-generator] ready. Start:"
+        echo "  docker compose exec load-generator /load-test/load.sh 600 20"
+        tail -f /dev/null
+    depends_on:
+      order-service:
+        condition: service_started
+    networks: [workshop-net]
+    restart: "no"
+
+networks:
+  workshop-net:
+    driver: bridge
+    name: transactional-workshop-net
+
+volumes:
+  postgres-data:
+  prometheus-data:
+  grafana-data:

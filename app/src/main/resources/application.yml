@@ -1,0 +1,98 @@
+server:
+  port: 8080
+  tomcat:
+    threads:
+      # Пул Tomcat намеренно больше пула БД: часть запросов ждёт соединение,
+      # но сам сервис продолжает принимать новые подключения и отвечать на /api/health.
+      max: 40
+      min-spare: 10
+    accept-count: 200
+    max-connections: 2000
+  error:
+    include-message: always
+    include-binding-errors: always
+
+spring:
+  application:
+    name: order-service
+  datasource:
+    url: jdbc:postgresql://${DB_HOST:localhost}:${DB_PORT:5432}/${DB_NAME:workshop}?ApplicationName=order-service&connectTimeout=5
+    username: ${DB_USER:workshop}
+    password: ${DB_PASSWORD:workshop}
+    hikari:
+      pool-name: order-pool
+      maximum-pool-size: ${DB_POOL_MAX:10}
+      minimum-idle: 2
+      # Долгий таймаут: при исчерпании пула потоки висят, а не падают сразу.
+      # Это делает симптом «заказы не проходят, CPU низкий» реалистичным.
+      connection-timeout: 10000
+      validation-timeout: 2000
+      idle-timeout: 300000
+      max-lifetime: 1200000
+  jpa:
+    open-in-view: false
+    hibernate:
+      ddl-auto: none
+    properties:
+      hibernate:
+        jdbc:
+          time_zone: UTC
+  sql:
+    init:
+      mode: never
+  mvc:
+    problemdetails:
+      enabled: false
+
+app:
+  payment:
+    base-url: ${PAYMENT_URL:http://localhost:8089}
+    connect-timeout-ms: ${PAYMENT_CONNECT_TIMEOUT_MS:2000}
+    read-timeout-ms: ${PAYMENT_READ_TIMEOUT_MS:5000}
+  workshop:
+    # wide = весь сценарий заказа выполняется в одной транзакции.
+    # narrow = транзакция охватывает только операции с БД (ветка solution).
+    transaction-scope: ${WORKSHOP_TRANSACTION_SCOPE:wide}
+    watchdog-interval-ms: ${WORKSHOP_WATCHDOG_INTERVAL_MS:2000}
+
+management:
+  server:
+    # Отдельный management-порт — осознанное решение для воркшопа.
+    # Метрики и thread dump остаются доступны, даже когда основной пул запросов занят.
+    port: ${MANAGEMENT_PORT:8081}
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus,env,configprops,loggers,threaddump,workshop
+  endpoint:
+    health:
+      show-details: always
+      probes:
+        enabled: true
+    prometheus:
+      access: read_only
+  metrics:
+    tags:
+      application: order-service
+      service: order-service
+    distribution:
+      percentiles-histogram:
+        http.server.requests: true
+        workshop.order.total: true
+        workshop.payment.call: true
+      percentiles:
+        http.server.requests: 0.5,0.95,0.99
+  prometheus:
+    metrics:
+      export:
+        enabled: true
+
+logging:
+  pattern:
+    console: "%d{HH:mm:ss.SSS} %-5level [%thread] %logger{32} - %msg%n"
+  level:
+    root: INFO
+    com.workshop.orders: INFO
+    com.zaxxer.hikari: INFO
+    org.hibernate.SQL: WARN
+    org.hibernate.orm.SQL.WARN: WARN
